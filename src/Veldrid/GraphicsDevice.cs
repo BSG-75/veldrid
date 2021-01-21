@@ -13,6 +13,9 @@ namespace Veldrid
     {
         private readonly object _deferredDisposalLock = new object();
         private readonly List<IDisposable> _disposables = new List<IDisposable>();
+        private readonly List<IDisposable> _autoDisposables = new List<IDisposable>();
+        private long _autoDisposeThreshold;
+        private long _autoDisposeCounter;
         private Sampler _aniso4xSampler;
 
         internal GraphicsDevice() { }
@@ -29,7 +32,7 @@ namespace Veldrid
 
         /// <summary>
         /// Gets a value identifying whether texture coordinates begin in the top left corner of a Texture.
-        /// If true, (0, 0) refers to the top-left texel of a Texture. If false, (0, 0) refers to the bottom-left 
+        /// If true, (0, 0) refers to the top-left texel of a Texture. If false, (0, 0) refers to the bottom-left
         /// texel of a Texture. This property is useful for determining how the output of a Framebuffer should be sampled.
         /// </summary>
         public abstract bool IsUvOriginTopLeft { get; }
@@ -95,6 +98,32 @@ namespace Veldrid
         /// accepting dynamic offsets, each offset must be a multiple of this value.
         /// </summary>
         public uint StructuredBufferMinOffsetAlignment => GetStructuredBufferMinOffsetAlignmentCore();
+
+        /// <summary>
+        /// A threshold to allow automatic dispose of <see cref="IDisposable"/> objects added through
+        /// <see cref="DisposeWhenIdle(IDisposable, long)"/>, when the cumulated size hint from
+        /// <see cref="AddAutoDisposePressure(long)"/> or <see cref="DisposeWhenIdle(IDisposable, long)"/> reaches the given
+        /// threshold.
+        /// <br/>
+        /// When the threshold has been reached, <see cref="GraphicsDevice"/> will block until all submitted
+        /// <see cref="CommandList"/> objects have fully completed, and then it will start to dispose objects added through
+        /// <see cref="DisposeWhenIdle(IDisposable, long)"/>.
+        /// To maintain backward compatibility, <see cref="IDisposable"/> objects added through
+        /// <see cref="DisposeWhenIdle(IDisposable)"/> will <i>not</i> be disposed automaticaly, they still need to be disposed
+        /// by using <see cref="WaitForIdle()"/> or <see cref="Dispose()"/>.
+        /// </summary>
+        public long AutoDisposeThreshold
+        {
+            get { lock(_deferredDisposalLock) { return _autoDisposeThreshold; } }
+            set
+            {
+                lock(_deferredDisposalLock)
+                {
+                    _autoDisposeThreshold = value;
+                    AddAutoDisposePressure(0); // starts a check
+                }
+            }
+        }
 
         internal abstract uint GetUniformBufferMinOffsetAlignmentCore();
         internal abstract uint GetStructuredBufferMinOffsetAlignmentCore();
@@ -726,6 +755,60 @@ namespace Veldrid
             }
         }
 
+        /// <summary>
+        /// Adds the given object to a deferred disposal list, and provide a hint size so <see cref="GraphicsDevice"/> can
+        /// estimate the amount of resources held by deferred disposal list. The deferred disposal list will processed by the
+        /// GraphicsDevice when <see cref="GraphicsDevice.WaitForIdle"/> is called, but GraphicsDevice will also call
+        /// <see cref="GraphicsDevice.WaitForIdle"/> automatically in this method if the cumulated hint size exceeded
+        /// <see cref="GraphicsDevice.WaitAndDisposeThreshold"/>.
+        /// This method can be used to safely dispose a device resource which may be in use at the time this method is called,
+        /// but which will no longer be in use when the device is idle.
+        /// </summary>
+        /// <param name="disposable">An object to dispose when this instance becomes idle.</param>
+        public void DisposeWhenIdle(IDisposable disposable, long sizeHint)
+        {
+            lock (_deferredDisposalLock)
+            {
+                _disposables.Add(disposable);
+                if (!AddMemoryPressureAndCheckShouldDispose(sizeHint))
+                {
+                    return;
+                }
+            }
+            WaitForIdle();
+        }
+
+        /// <summary>
+        /// Updates the <see cref="GraphicsDevice"/>'s internal auto dispose counter. If it reaches <see cref="GraphicsDevice."/> A threshold to allow automatic dispose of <see cref="IDisposable"/> objects added through
+        /// <see cref="GraphicsDevice.DisposeWhenIdle(IDisposable, long)"/>, when the cumulated size hint from
+        /// <see cref="GraphicsDevice.AddAutoDisposePressure(long)"/> or
+        /// <see cref="GraphicsDevice.DisposeWhenIdle(IDisposable, long)"/> reaches the given threshold.
+        /// <br/>
+        /// When the threshold has been reached, <see cref="GraphicsDevice"/> will block until all submitted
+        /// <see cref="CommandList"/> objects have fully completed, and then it will start to dispose objects added through
+        /// <see cref="GraphicsDevice.DisposeWhenIdle(IDisposable, long)"/>.
+        /// To maintain backward compatibility, <see cref="IDisposable"/> objects added through
+        /// <see cref="GraphicsDevice.DisposeWhenIdle(IDisposable)"/> will <i>not</i> be disposed automaticaly, they still need
+        /// to be disposed by using <see cref="GraphicsDevice.WaitForIdle()"/> or <see cref="GraphicsDevice.Dispose()"/>.
+        /// </summary>
+        public void AddAutoDisposePressure(long sizeHint)
+        {
+            if (!AddMemoryPressureAndCheckShouldDispose(sizeHint))
+            {
+                return;
+            }
+            WaitForIdle();
+        }
+
+        private bool AddMemoryPressureAndCheckShouldDispose()
+        {
+            lock (_lock)
+            {
+                _waitAndDisposeCounter += sizeHint;
+                return _waitAndDisposeCounter > _waitAndDisposeThreshold;
+            }
+        }
+
         private void FlushDeferredDisposals()
         {
             lock (_deferredDisposalLock)
@@ -735,6 +818,7 @@ namespace Veldrid
                     disposable.Dispose();
                 }
                 _disposables.Clear();
+                _waitAndDisposeCounter = 0;
             }
         }
 
