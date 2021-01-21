@@ -1,0 +1,9 @@
+image: gitpod/workspace-dotnet
+
+tasks:
+  - init: 'echo "TODO: Replace with init/build command"'
+    command: 'echo "TODO: Replace with command to start project"'
+
+vscode:
+  extensions:
+    - muhammad-sammy.csharp@1.23.8:sQVKBcQ6FdF5kPQ+V6fc5Q==
